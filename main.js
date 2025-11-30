@@ -15,17 +15,26 @@ function createWindow() {
       webSecurity: true,
       // メモリ最適化設定
       backgroundThrottling: true,
-      // ハードウェアアクセラレーション有効化（GPU使用でメモリ効率化）
-      enableWebSQL: false,
       // 不要な機能を無効化
+      enableWebSQL: false,
       nodeIntegrationInWorker: false,
       nodeIntegrationInSubFrames: false,
-      // V8のメモリ制限
-      v8CacheOptions: 'code'
+      // V8のメモリ最適化
+      v8CacheOptions: 'code',
+      // パフォーマンス最適化
+      spellcheck: false, // スペルチェック無効化
+      // WebGPUサポートを有効化
+      enableBlinkFeatures: 'WebGPU',
+      // 不要な機能を無効化
+      disableBlinkFeatures: 'AutomationControlled',
+      // ハードウェアアクセラレーション有効（WebGPU用）
+      enablePreferredSizeMode: false
     },
     icon: path.join(__dirname, 'build/icon.png'),
     // ウィンドウの最適化
-    show: false // 準備完了後に表示
+    show: false, // 準備完了後に表示
+    // 背景色を設定してちらつきを防止
+    backgroundColor: '#000000'
   });
 
   // pjsekai.worldを読み込む
@@ -36,12 +45,20 @@ function createWindow() {
     mainWindow.show();
   });
 
-  // メモリ最適化：定期的なガベージコレクション
-  setInterval(() => {
+  // メモリ最適化：定期的なキャッシュクリア（30分ごと）
+  const cacheCleanupInterval = setInterval(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.session.clearCache();
+      mainWindow.webContents.session.clearCache().catch(err => {
+        console.error('Cache clear error:', err);
+      });
     }
-  }, 30 * 60 * 1000); // 30分ごと
+  }, 30 * 60 * 1000);
+
+  // ウィンドウ閉じるときにインターバルをクリア
+  mainWindow.on('closed', () => {
+    clearInterval(cacheCleanupInterval);
+    mainWindow = null;
+  });
 
   // メニューバーを作成
   const template = [
@@ -66,6 +83,23 @@ function createWindow() {
           label: 'キャッシュクリア',
           click: () => {
             mainWindow.webContents.session.clearCache().then(() => {
+              mainWindow.reload();
+            }).catch(err => {
+              console.error('Cache clear error:', err);
+              mainWindow.reload();
+            });
+          }
+        },
+        {
+          label: '完全クリア（キャッシュ+ストレージ）',
+          click: () => {
+            Promise.all([
+              mainWindow.webContents.session.clearCache(),
+              mainWindow.webContents.session.clearStorageData()
+            ]).then(() => {
+              mainWindow.reload();
+            }).catch(err => {
+              console.error('Full clear error:', err);
               mainWindow.reload();
             });
           }
@@ -157,6 +191,7 @@ function createWindow() {
             mainWindow.loadURL('https://pjsekai.world/about');
           }
         },
+        { type: 'separator' },
         {
           label: 'GitHubリポジトリ',
           click: () => {
@@ -170,12 +205,7 @@ function createWindow() {
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
 
-  // ウィンドウが閉じられたときの処理
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // 新しいウィンドウを開くリンクはデフォルトのブラウザで開く
+  // 新しいウィンドウを開くリンクの処理
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // pjsekai.world内のリンクはアプリ内で開く
     if (url.startsWith('https://pjsekai.world')) {
@@ -187,31 +217,66 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  // メモリリーク防止：長時間のレンダラープロセス最適化
+  // メムリリーク防止：レンダラープロセスクラッシュ時の自動リカバリ
   mainWindow.webContents.on('render-process-gone', (event, details) => {
-    console.log('Renderer process gone:', details);
+    console.error('Renderer process gone:', details);
     if (details.reason !== 'clean-exit') {
+      console.log('Attempting to reload...');
       mainWindow.reload();
     }
   });
+
+  // メモリ警告のログ
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.error('Page load failed:', errorCode, errorDescription);
+  });
 }
 
-// アプリケーション起動時の最適化
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
-app.commandLine.appendSwitch('disable-gpu-compositing'); // GPU合成を無効化してメモリ削減（必要に応じて）
-// メモリ使用量を制限（オプション）
+// アプリケーション起動時のコマンドラインスイッチ
+// 不要な機能を無効化
+ app.commandLine.appendSwitch('disable-features', [
+  'CalculateNativeWinOcclusion',
+  'MediaRouter', // Chromecast等のメディアルーター
+  'AudioServiceOutOfProcess', // オーディオサービスの分離プロセス
+  'HeavyAdIntervention', // 広告制御
+  'IdleDetection' // アイドル検出
+].join(','));
+
+// WebGPUを有効化
+app.commandLine.appendSwitch('enable-features', [
+  'Vulkan', // Vulkanサポート
+  'WebGPU', // WebGPUサポート
+  'WebGPUService' // WebGPUサービス
+].join(','));
+
+// ハードウェアアクセラレーションを有効に保つ（WebGPU用）
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+
+// V8メモリ制限（JavaScriptヒープ）
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
 
-// セッション最適化
+// レンダリング最適化
+app.commandLine.appendSwitch('disable-software-rasterizer'); // ソフトウェアレンダラー無効
+app.commandLine.appendSwitch('disable-dev-shm-usage'); // /dev/shm使用を無効化
+
+// セッション設定
 app.whenReady().then(() => {
-  // キャッシュサイズを制限
-  session.defaultSession.setCache({
-    maxSize: 50 * 1024 * 1024 // 50MB
+  // キャッシュサイズはセッション生成後に設定（別の方法で）
+  // ElectronのAPI仕様に合わせて調整
+  session.defaultSession.setUserAgent(
+    session.defaultSession.getUserAgent()
+  );
+
+  // 不要なプロトコルインターセプターを設定
+  session.defaultSession.protocol.interceptFileProtocol('file', (request, callback) => {
+    callback({ error: -3 }); // ファイルプロトコルをブロック
   });
 
-  // 不要なプロトコルを無効化
-  session.defaultSession.protocol.interceptFileProtocol('file', (request, callback) => {
-    callback({ error: -3 }); // ファイルプロトコルを無効化
+  // パーミッションリクエストの処理（不要なパーミッションを拒否）
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const allowedPermissions = ['notifications', 'media', 'fullscreen'];
+    callback(allowedPermissions.includes(permission));
   });
 
   createWindow();
@@ -232,10 +297,23 @@ app.on('window-all-closed', () => {
   }
 });
 
-// アプリ終了前にキャッシュクリア
+// アプリ終了前のクリーンアップ
 app.on('before-quit', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.session.clearCache();
-    mainWindow.webContents.session.clearStorageData();
+    Promise.all([
+      mainWindow.webContents.session.clearCache(),
+      mainWindow.webContents.session.clearStorageData()
+    ]).catch(err => {
+      console.error('Cleanup error:', err);
+    });
   }
+});
+
+// エラーハンドラー
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled promise rejection:', reason);
 });
