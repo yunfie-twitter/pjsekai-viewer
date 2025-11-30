@@ -81,5 +81,4 @@ MIT License
 
 ## リンク
 
-- [pjsekai.world](https://pjsekai.world) - Project SEKAI公式サイト
 - [GitHub Repository](https://github.com/yunfie-twitter/pjsekai-viewer)
