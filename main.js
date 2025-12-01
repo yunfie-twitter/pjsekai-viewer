@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session } = require('electron');
+const { app, BrowserWindow, Menu, session, Notification } = require('electron');
 const path = require('path');
 
 let mainWindow;
@@ -23,35 +23,33 @@ function createWindow() {
       // V8のメモリ最適化
       v8CacheOptions: 'code',
       // パフォーマンス最適化
-      spellcheck: false, // スペルチェック無効化
+      spellcheck: false,
       // WebGPUサポートを有効化
       enableBlinkFeatures: 'WebGPU',
       // 不要な機能を無効化
       disableBlinkFeatures: 'AutomationControlled',
-      // ハードウェアアクセラレーション有効（WebGPU用）
-      enablePreferredSizeMode: false
+      // ハードウェアアクセラレーション有効
+      enablePreferredSizeMode: false,
+      // データ永続化のためにpartitionを設定
+      partition: 'persist:pjsekai'
     },
     icon: path.join(__dirname, 'build/icon.png'),
     // ウィンドウの最適化
-    show: false, // 準備完了後に表示
-    // 背景色を設定してちらつきを防止
+    show: false,
     backgroundColor: '#000000'
   });
 
   // pjsekai.worldを読み込む
   mainWindow.loadURL('https://pjsekai.world');
 
-  // ページ読み込み完了後に表示（ちらつき防止）
+  // ページ読み込み完了後に表示
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
 
-  // スムーススクロールの有効化（CSSを注入）
+  // スムーススクロールのみ有効化（スクロールバーCSSはサイトのものを使用）
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
-      * {
-        scroll-behavior: smooth !important;
-      }
       html {
         scroll-behavior: smooth !important;
       }
@@ -59,8 +57,10 @@ function createWindow() {
   });
 
   // メモリ最適化：定期的なキャッシュクリア（30分ごと）
+  // リロードを行わないように修正
   const cacheCleanupInterval = setInterval(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
+      // キャッシュクリアのみでリロードしない
       mainWindow.webContents.session.clearCache().catch(err => {
         console.error('Cache clear error:', err);
       });
@@ -70,7 +70,6 @@ function createWindow() {
   // ウィンドウ閉じるときにインターバルをクリア
   mainWindow.on('closed', () => {
     clearInterval(cacheCleanupInterval);
-    // DevToolsウィンドウも閉じる
     if (devToolsWindow && !devToolsWindow.isDestroyed()) {
       devToolsWindow.close();
     }
@@ -108,17 +107,27 @@ function createWindow() {
           }
         },
         {
-          label: '完全クリア（キャッシュ+ストレージ）',
+          label: '完全クリア（注意：ログイン情報も削除）',
           click: () => {
-            Promise.all([
-              mainWindow.webContents.session.clearCache(),
-              mainWindow.webContents.session.clearStorageData()
-            ]).then(() => {
-              mainWindow.reload();
-            }).catch(err => {
-              console.error('Full clear error:', err);
-              mainWindow.reload();
+            const response = require('electron').dialog.showMessageBoxSync(mainWindow, {
+              type: 'warning',
+              buttons: ['キャンセル', '実行'],
+              defaultId: 0,
+              title: '完全クリア',
+              message: '全てのデータ（ログイン情報、Cookie、キャッシュ）を削除します。\nよろしいですか？'
             });
+            
+            if (response === 1) {
+              Promise.all([
+                mainWindow.webContents.session.clearCache(),
+                mainWindow.webContents.session.clearStorageData()
+              ]).then(() => {
+                mainWindow.reload();
+              }).catch(err => {
+                console.error('Full clear error:', err);
+                mainWindow.reload();
+              });
+            }
           }
         },
         { type: 'separator' },
@@ -204,7 +213,6 @@ function createWindow() {
         {
           label: 'pjsekai.worldについて',
           click: () => {
-            // アプリ内で /about ページを開く
             mainWindow.loadURL('https://pjsekai.world/about');
           }
         },
@@ -224,26 +232,23 @@ function createWindow() {
 
   // 新しいウィンドウを開くリンクの処理
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    // pjsekai.world内のリンクはアプリ内で開く
     if (url.startsWith('https://pjsekai.world')) {
       mainWindow.loadURL(url);
       return { action: 'deny' };
     }
-    // 外部リンクはブラウザで開く
     require('electron').shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // メムリリーク防止：レンダラープロセスクラッシュ時の自動リカバリ
+  // レンダラープロセスクラッシュ時のみリカバリ（謎のリロードを防止）
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     console.error('Renderer process gone:', details);
-    if (details.reason !== 'clean-exit') {
-      console.log('Attempting to reload...');
+    if (details.reason === 'crashed' || details.reason === 'oom' || details.reason === 'launch-failed') {
+      console.log('Critical error, reloading...');
       mainWindow.reload();
     }
   });
 
-  // メモリ警告のログ
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
     console.error('Page load failed:', errorCode, errorDescription);
   });
@@ -276,65 +281,47 @@ function openDevToolsWindow() {
 }
 
 // アプリケーション起動時のコマンドラインスイッチ
-// 不要な機能を無効化
 app.commandLine.appendSwitch('disable-features', [
   'CalculateNativeWinOcclusion',
-  'MediaRouter', // Chromecast等のメディアルーター
-  'AudioServiceOutOfProcess', // オーディオサービスの分離プロセス
-  'HeavyAdIntervention', // 広告制御
-  'IdleDetection' // アイドル検出
+  'MediaRouter',
+  'AudioServiceOutOfProcess',
+  'HeavyAdIntervention',
+  'IdleDetection'
 ].join(','));
 
-// WebGPUとWeb Push API、スムーススクロールを有効化
 app.commandLine.appendSwitch('enable-features', [
-  'Vulkan', // Vulkanサポート
-  'WebGPU', // WebGPUサポート
-  'WebGPUService', // WebGPUサービス
-  'PushMessaging', // Web Push API
-  'Notifications', // 通知API
-  'SmoothScrolling' // スムーススクロール
+  'Vulkan',
+  'WebGPU',
+  'WebGPUService',
+  'PushMessaging',
+  'Notifications',
+  'SmoothScrolling'
 ].join(','));
 
-// ハードウェアアクセラレーションを有効に保つ（WebGPU用）
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
-
-// V8メモリ制限（JavaScriptヒープ）
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
-
-// レンダリング最適化
-app.commandLine.appendSwitch('disable-software-rasterizer'); // ソフトウェアレンダラー無効
-app.commandLine.appendSwitch('disable-dev-shm-usage'); // /dev/shm使用を無効化
-
-// WebAuthn高速化：タイムアウトを短くしてレスポンス時間を改善
-app.commandLine.appendSwitch('webauthn-timeout', '30000'); // 30秒（デフォルトより短い）
+app.commandLine.appendSwitch('disable-software-rasterizer');
+app.commandLine.appendSwitch('disable-dev-shm-usage');
+app.commandLine.appendSwitch('webauthn-timeout', '30000');
 
 // セッション設定
 app.whenReady().then(() => {
-  // User Agentの設定
-  session.defaultSession.setUserAgent(
-    session.defaultSession.getUserAgent()
-  );
+  const ses = session.fromPartition('persist:pjsekai');
 
-  // 不要なプロトコルインターセプターを設定
-  session.defaultSession.protocol.interceptFileProtocol('file', (request, callback) => {
-    callback({ error: -3 }); // ファイルプロトコルをブロック
+  ses.setUserAgent(ses.getUserAgent());
+
+  ses.protocol.interceptFileProtocol('file', (request, callback) => {
+    callback({ error: -3 });
   });
 
-  // パーミッションリクエストの処理（Web Push APIを含む）
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const allowedPermissions = [
-      'notifications', // 通知
-      'media', // メディア
-      'fullscreen', // 全画面
-      'push' // Web Push API
-    ];
+  // パーミッションリクエストの処理
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    const allowedPermissions = ['notifications', 'media', 'fullscreen', 'push'];
     callback(allowedPermissions.includes(permission));
   });
 
-  // パーミッションチェックの処理
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-    // pjsekai.worldのみ許可
+  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
     if (requestingOrigin.startsWith('https://pjsekai.world')) {
       const allowedPermissions = ['notifications', 'media', 'fullscreen', 'push'];
       return allowedPermissions.includes(permission);
@@ -345,34 +332,24 @@ app.whenReady().then(() => {
   createWindow();
 
   app.on('activate', () => {
-    // macOSでDockアイコンがクリックされたときの処理
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
 });
 
-// すべてのウィンドウが閉じられたときの処理
 app.on('window-all-closed', () => {
-  // macOS以外ではアプリケーションを終了
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-// アプリ終了前のクリーンアップ
+// 終了時にデータを保持（クリアしない）
 app.on('before-quit', () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    Promise.all([
-      mainWindow.webContents.session.clearCache(),
-      mainWindow.webContents.session.clearStorageData()
-    ]).catch(err => {
-      console.error('Cleanup error:', err);
-    });
-  }
+  // データを保持するため、クリア処理を削除
+  console.log('App closing, preserving data...');
 });
 
-// エラーハンドラー
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception:', error);
 });
