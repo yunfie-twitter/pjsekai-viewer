@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, session } = require('electron');
 const path = require('path');
 
 let mainWindow;
+let devToolsWindow = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -45,6 +46,18 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // スムーススクロールの有効化（CSSを注入）
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow.webContents.insertCSS(`
+      * {
+        scroll-behavior: smooth !important;
+      }
+      html {
+        scroll-behavior: smooth !important;
+      }
+    `);
+  });
+
   // メモリ最適化：定期的なキャッシュクリア（30分ごと）
   const cacheCleanupInterval = setInterval(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -57,6 +70,10 @@ function createWindow() {
   // ウィンドウ閉じるときにインターバルをクリア
   mainWindow.on('closed', () => {
     clearInterval(cacheCleanupInterval);
+    // DevToolsウィンドウも閉じる
+    if (devToolsWindow && !devToolsWindow.isDestroyed()) {
+      devToolsWindow.close();
+    }
     mainWindow = null;
   });
 
@@ -150,10 +167,10 @@ function createWindow() {
         },
         { type: 'separator' },
         {
-          label: '開発者ツール',
+          label: '開発者ツール（別ウィンドウ）',
           accelerator: 'CmdOrCtrl+Shift+I',
           click: () => {
-            mainWindow.webContents.toggleDevTools();
+            openDevToolsWindow();
           }
         }
       ]
@@ -232,9 +249,35 @@ function createWindow() {
   });
 }
 
+// 開発者ツールを別ウィンドウで開く関数
+function openDevToolsWindow() {
+  if (devToolsWindow && !devToolsWindow.isDestroyed()) {
+    devToolsWindow.focus();
+    return;
+  }
+
+  devToolsWindow = new BrowserWindow({
+    width: 1000,
+    height: 700,
+    title: 'DevTools - PJSEKAI Viewer',
+    show: false
+  });
+
+  mainWindow.webContents.setDevToolsWebContents(devToolsWindow.webContents);
+  mainWindow.webContents.openDevTools({ mode: 'detach' });
+
+  devToolsWindow.once('ready-to-show', () => {
+    devToolsWindow.show();
+  });
+
+  devToolsWindow.on('closed', () => {
+    devToolsWindow = null;
+  });
+}
+
 // アプリケーション起動時のコマンドラインスイッチ
 // 不要な機能を無効化
- app.commandLine.appendSwitch('disable-features', [
+app.commandLine.appendSwitch('disable-features', [
   'CalculateNativeWinOcclusion',
   'MediaRouter', // Chromecast等のメディアルーター
   'AudioServiceOutOfProcess', // オーディオサービスの分離プロセス
@@ -242,11 +285,14 @@ function createWindow() {
   'IdleDetection' // アイドル検出
 ].join(','));
 
-// WebGPUを有効化
+// WebGPUとWeb Push API、スムーススクロールを有効化
 app.commandLine.appendSwitch('enable-features', [
   'Vulkan', // Vulkanサポート
   'WebGPU', // WebGPUサポート
-  'WebGPUService' // WebGPUサービス
+  'WebGPUService', // WebGPUサービス
+  'PushMessaging', // Web Push API
+  'Notifications', // 通知API
+  'SmoothScrolling' // スムーススクロール
 ].join(','));
 
 // ハードウェアアクセラレーションを有効に保つ（WebGPU用）
@@ -260,10 +306,12 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
 app.commandLine.appendSwitch('disable-software-rasterizer'); // ソフトウェアレンダラー無効
 app.commandLine.appendSwitch('disable-dev-shm-usage'); // /dev/shm使用を無効化
 
+// WebAuthn高速化：タイムアウトを短くしてレスポンス時間を改善
+app.commandLine.appendSwitch('webauthn-timeout', '30000'); // 30秒（デフォルトより短い）
+
 // セッション設定
 app.whenReady().then(() => {
-  // キャッシュサイズはセッション生成後に設定（別の方法で）
-  // ElectronのAPI仕様に合わせて調整
+  // User Agentの設定
   session.defaultSession.setUserAgent(
     session.defaultSession.getUserAgent()
   );
@@ -273,10 +321,25 @@ app.whenReady().then(() => {
     callback({ error: -3 }); // ファイルプロトコルをブロック
   });
 
-  // パーミッションリクエストの処理（不要なパーミッションを拒否）
+  // パーミッションリクエストの処理（Web Push APIを含む）
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const allowedPermissions = ['notifications', 'media', 'fullscreen'];
+    const allowedPermissions = [
+      'notifications', // 通知
+      'media', // メディア
+      'fullscreen', // 全画面
+      'push' // Web Push API
+    ];
     callback(allowedPermissions.includes(permission));
+  });
+
+  // パーミッションチェックの処理
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    // pjsekai.worldのみ許可
+    if (requestingOrigin.startsWith('https://pjsekai.world')) {
+      const allowedPermissions = ['notifications', 'media', 'fullscreen', 'push'];
+      return allowedPermissions.includes(permission);
+    }
+    return false;
   });
 
   createWindow();
